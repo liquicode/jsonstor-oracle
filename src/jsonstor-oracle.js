@@ -989,6 +989,31 @@ module.exports = {
 		//=====================================================================
 
 
+		// ***What this storage is actually talking to.*** The driver already knows: an open
+		// `oracledb` connection carries the server version, so no statement is needed and none
+		// is sent. ***This is also the more precise answer*** - `product_component_version`
+		// reports `21.0.0.0.0` on a server which is really 21.3, and a version rounded to its
+		// major would make the container naming rule unauditable.
+		Storage.StorageInfo = async function ( Options )
+		{
+			let connection = await held_connection();
+			let version = connection.oracleServerVersionString || '';
+			// The catalog is the fallback, in case a driver ever stops carrying the property.
+			if ( version === '' )
+			{
+				let answer = await SQL_Passthrough(
+					`SELECT version AS server_version FROM product_component_version WHERE product LIKE 'Oracle%'`, [] );
+				let row = answer.results[ 0 ] || {};
+				version = row.SERVER_VERSION || '';
+			}
+			return jsonstor.BuildStorageInfo( Storage, {
+				Product: 'Oracle',
+				Version: version,
+				Endpoint: `${Storage.Settings.Server}:${Storage.Settings.Port}`,
+			} );
+		};
+
+
 		Storage.DropStorage = async function ( Options )
 		{
 			// ***PURGE, because Oracle has a recycle bin.*** Without it a dropped table becomes
