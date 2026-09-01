@@ -39,7 +39,7 @@ let storage = jsonstor.GetStorage( 'jsonstor-oracle', {
 	Server: "localhost",
 	Port: 1521,
 	Database: '...',
-	Schema: the `UserName`, upper cased,
+	Schema: '...',
 	Table: '...',
 	IdField: "",
 	UserName: '...',
