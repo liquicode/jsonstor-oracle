@@ -11,8 +11,13 @@ module.exports = {
 	AdapterName: 'jsonstor-oracle',
 	AdapterDescription: 'Documents are stored in an Oracle database.',
 
-	GetAdapter: function ( jsonstor, Settings )
+	// ***This package is two primes, so GetAdapter takes a third parameter its siblings do
+	// not.*** Each prime passes its own dialect profile; `GetStorage` calls with two arguments
+	// and gets the older profile, which is the safe one - every 18.0 rendering runs correctly
+	// on 23c and merely pre-filters less. See the profiles at the foot of this file.
+	GetAdapter: function ( jsonstor, Settings, Profile )
 	{
+		if ( jsongin.ShortType( Profile ) !== 'o' ) { Profile = ORACLE_V18_PROFILE; }
 
 
 		//=====================================================================
@@ -104,14 +109,18 @@ module.exports = {
 			// ORA-00907: missing right parenthesis. So a negation is written the long way:
 			//     oracle    ((NOT ("a" >= 0)) OR "a" IS NULL)
 			//     postgres  (("a" >= 0) IS NOT TRUE)
-			NegateWithIsNotTrue: false,
+			// ***Measured on 2026-09-01: 18.0 and 21.3 refuse it and 23.26 accepts it.***
+			NegateWithIsNotTrue: Profile.HasBoolean,
 			// ***And the portable form does not run here either, which is the discovery this
 			// adapter cost.*** `((NOT ("n" >= 0)) OR ("n" >= 0) IS NULL)` answers the same
 			// ORA-00907, because Oracle has no boolean expression type: a comparison cannot
 			// appear where a value is wanted, which rules out both of the forms that existed.
 			// A CASE takes a condition and can tell TRUE from FALSE and UNKNOWN, so it is the
 			// spelling here. See negate() in jsonstor's SqlExpression.js.
-			NegateWithCaseExpression: true,
+			//
+			// ***23c is where that stops being true.*** It has a real boolean expression type,
+			// so `IS NOT TRUE` runs and the CASE is no longer needed.
+			NegateWithCaseExpression: !Profile.HasBoolean,
 			// ***Left unrendered on purpose.*** Oracle can express both, and so can every
 			// sibling which declares them false: a rendering is trusted once a live server of
 			// that dialect has licensed it, and per-dialect parity is deferred. Dropping them
@@ -131,7 +140,11 @@ module.exports = {
 			// that four SQL dialects would cost nothing but settings on a translator which
 			// already existed, and that held for Postgres and DuckDB exactly. It did not hold
 			// here. See jsonx/.plans/story.md.
-			BooleanLiterals: 'number',
+			//
+			// ***And it is the option which made this package a family.*** 23c has the type and
+			// the literals, which is the boundary the whole versioned-adapter scheme was built
+			// from. Measured on 2026-09-01: 23.26 takes `"b" = TRUE` and `"b" = 1` both.
+			BooleanLiterals: Profile.HasBoolean ? 'keyword' : 'number',
 		};
 
 
@@ -159,14 +172,20 @@ module.exports = {
 
 
 		//=====================================================================
-		// ***There is deliberately no 'b' in this function, and that is a fact about the
-		// engine rather than an omission.*** Oracle has no BOOLEAN column type before 23c, so
-		// no column can be declared to hold one, so no boolean value ever fits a column here -
-		// it goes to the payload with a NULL left behind, and F4's broadening admits the row.
-		// The cost is that a boolean predicate never pre-filters on this engine.
+		// ***Whether there is a 'b' here is a fact about the server version rather than an
+		// omission.*** Oracle has no BOOLEAN column type before 23c, so no column can be
+		// declared to hold one, so no boolean value ever fits a column - it goes to the payload
+		// with a NULL left behind, and F4's broadening admits the row. The cost is that a
+		// boolean predicate never pre-filters on the older profile.
+		//
+		// ***This is the site which proves a dialect is not the translator's business alone.***
+		// The catalog reports `BOOLEAN` on 23.26 and the profile is what decides whether this
+		// adapter believes it, so the same fact is read here, in ColumnTypes and in
+		// value_to_parameter. Measured on 2026-09-01.
 		function short_type_of( DataType )
 		{
 			let type = ( jsongin.ShortType( DataType ) === 's' ) ? DataType.toUpperCase() : '';
+			if ( Profile.HasBoolean && ( type === 'BOOLEAN' ) ) { return 'b'; }
 			if ( type === 'NUMBER' ) { return 'n'; }
 			if ( type === 'FLOAT' ) { return 'n'; }
 			if ( type === 'BINARY_FLOAT' ) { return 'n'; }
@@ -264,8 +283,39 @@ module.exports = {
 		//
 		// The one place a statement runs. Normalized to the { results, info } shape the sibling
 		// adapters answer with, so that a caller reads the same way in all five.
+		// ***The dialect is checked against the server once, on the first statement.***
+		//
+		// The connection is lazy and `GetStorage` is synchronous, so a mismatched server cannot
+		// be caught at construction and surfaces on the first operation instead. ***The outcome
+		// is remembered, so every later call fails the same way***: a storage pointed at a
+		// server its dialect cannot serve is wrong for its whole life, not only once.
+		//
+		// ***A server which did not answer is not remembered***, because that is a transient
+		// failure rather than an answer, and caching it would poison the storage.
+		let dialect_check = null;
+		async function ensure_dialect_checked()
+		{
+			if ( dialect_check !== null )
+			{
+				if ( dialect_check.Error ) { throw dialect_check.Error; }
+				return;
+			}
+			// Set before asking, so that StorageInfo's own statement does not re-enter this.
+			dialect_check = {};
+			try { await Storage.StorageInfo(); }
+			catch ( error )
+			{
+				if ( error && error.DialectBoundary ) { dialect_check.Error = error; }
+				else { dialect_check = null; }
+				throw error;
+			}
+			return;
+		}
+
+
 		async function SQL_Passthrough( SqlStatement, SqlParameters = [] )
 		{
+			await ensure_dialect_checked();
 			let connection = await held_connection();
 			let result = await connection.execute( SqlStatement, SqlParameters, {
 				outFormat: ORACLE.OUT_FORMAT_OBJECT,
@@ -308,13 +358,17 @@ module.exports = {
 		//=====================================================================
 		// A value on its way into a bound parameter.
 		//
-		// ***A boolean has no binding here.*** oracledb answers ORA-00932: inconsistent
-		// datatypes: expected NUMBER got BOOLEAN. Nothing should reach this with one, because
-		// no column can hold a boolean on this engine - see short_type_of - but converting is
-		// cheaper than a thrown driver error if a foreign table ever surprises us.
+		// ***A boolean has no binding before 23c.*** oracledb answers ORA-00932: inconsistent
+		// datatypes: expected NUMBER got BOOLEAN. Nothing should reach this with one on that
+		// profile, because no column can hold a boolean there - see short_type_of - but
+		// converting is cheaper than a thrown driver error if a foreign table ever surprises us.
+		//
+		// ***23c binds one directly***, measured on 2026-09-01, so converting there would write
+		// a number into a column which holds a boolean and read back the wrong type.
 		function value_to_parameter( Value )
 		{
 			if ( typeof Value === 'undefined' ) { return null; }
+			if ( Profile.HasBoolean ) { return Value; }
 			if ( Value === true ) { return 1; }
 			if ( Value === false ) { return 0; }
 			return Value;
@@ -962,11 +1016,13 @@ module.exports = {
 			// here - and a column's declared type is the promise this adapter keeps by writing
 			// NULL where a value does not match it, so the suite must not guess.
 			//
-			// ***`b` is a one digit number, because this engine has no boolean.*** The corpus
-			// already writes a boolean as 1 or 0 - better-sqlite3 refuses to bind one, so it had
-			// to - and BooleanLiterals makes the clause compare against the same spelling.
+			// ***`b` is a one digit number before 23c, because that engine has no boolean.***
+			// The corpus already writes a boolean as 1 or 0 - better-sqlite3 refuses to bind
+			// one, so it had to - and BooleanLiterals makes the clause compare against the same
+			// spelling. ***23c declares a real BOOLEAN***, which is what gives that profile a
+			// boolean pre-filter the older one cannot have.
 			ColumnTypes: {
-				b: 'NUMBER(1)',
+				b: Profile.BooleanColumnType,
 				n: 'NUMBER',
 				s: 'VARCHAR2(4000)',
 				i: 'NUMBER(10)',
@@ -1307,4 +1363,89 @@ module.exports = {
 		return Storage;
 	},
 
+};
+
+
+//---------------------------------------------------------------------
+// ***This package is two primes and five aliases, and it is the first package in the family
+// which needed more than one profile.***
+//
+// Oracle 18.0.0.0.0, 21.3.0.0.0 and 23.26.3.0.0 were measured against this adapter on
+// 2026-09-01. ***18.0 and 21.3 answered identically*** - no BOOLEAN type, no TRUE literal, no
+// IS NOT TRUE, no DROP TABLE IF EXISTS - so they are one profile. ***23.26 differs at six
+// sites***, which is why a dialect here is not a set of translator options: the catalog reader,
+// the column type map and the parameter binder read the same fact the translator does.
+//
+// ***11.2 is not a prime and cannot become one.*** node-oracledb 7 in Thin mode refuses the
+// connection outright with NJS-138, so the 12c identity-column floor this family predicted was
+// never reached and cannot be measured without Oracle Instant Client and Thick mode. ***The
+// floor here is the driver's rather than Oracle's***, which is a different fact than the one
+// `.plans/dialect-boundaries.md` had on record.
+//
+// See jsonx/.plans/versioned-adapters.md.
+
+// ***What actually changes between the two, in one object each.*** A profile is read
+// throughout the adapter and not only by the translator, which is the whole reason it is an
+// object rather than two more entries in SQL_DIALECT.
+const ORACLE_V18_PROFILE = {
+	// No BOOLEAN type, no boolean literal, and no boolean expression type either - so a
+	// negation needs a CASE and a boolean value never fits a column.
+	HasBoolean: false,
+	BooleanColumnType: 'NUMBER(1)',
+};
+
+const ORACLE_V23_PROFILE = {
+	// ***Measured on 23.26.3.0.0:*** the column type is accepted, the catalog reports
+	// `BOOLEAN`, `"b" = TRUE` and `"b" = 1` both run, `IS NOT TRUE` runs, the driver binds a
+	// JavaScript boolean, and a row reads back as `true` and `false`.
+	HasBoolean: true,
+	BooleanColumnType: 'BOOLEAN',
+};
+
+
+// ***A prime is a floor and takes the name of the oldest version it was proven against.***
+// 18.0 rather than 21.3, and 23.26 rather than 23 - a name follows a measurement here, so a
+// developer on 21.3 is told the dialect is `jsonstor-oracle-v18.0` and `StorageInfo()` carries
+// the server's own 21.3.0.0.0 as the third fact which makes that read as a floor.
+const ORACLE_V18 = {
+	AdapterName: 'jsonstor-oracle-v18.0',
+	AdapterDescription: module.exports.AdapterDescription,
+	GetAdapter: function ( jsonstor, Settings )
+	{
+		return module.exports.GetAdapter( jsonstor, Settings, ORACLE_V18_PROFILE );
+	},
+	Version: [ 18, 0 ],
+	MeasuredTo: [ 21, 3 ],
+};
+
+const ORACLE_V23 = {
+	AdapterName: 'jsonstor-oracle-v23.26',
+	AdapterDescription: module.exports.AdapterDescription,
+	GetAdapter: function ( jsonstor, Settings )
+	{
+		return module.exports.GetAdapter( jsonstor, Settings, ORACLE_V23_PROFILE );
+	},
+	Version: [ 23, 26 ],
+	// ***Every part of it, because the comparison zero-pads.*** The server measured here
+	// reports 23.26.3.0.0, and declaring [ 23, 26 ] would make this prime warn that its own
+	// test server was untested - which is exactly what jsonstor-mysql did until 2026-09-01.
+	MeasuredTo: [ 23, 26, 3 ],
+};
+
+module.exports.Adapters = [ ORACLE_V18, ORACLE_V23 ];
+
+// ***The bare name is listed here rather than left on the plugin object.*** Naming it stops
+// the plugin registering itself under it, so `GetStorage( 'jsonstor-oracle' )` reports the
+// prime it resolved to instead of reporting itself as its own dialect.
+//
+// ***It resolves to the older prime, which is the safe one.*** Every 18.0 rendering runs
+// correctly on 23c - the CASE negation is standard, NUMBER(1) still holds a boolean - so a
+// caller who names no version gets correct answers everywhere and a slower boolean query on
+// 23c. The reverse is not true, which is why the boundary check refuses it.
+module.exports.Aliases = {
+	'jsonstor-oracle': 'jsonstor-oracle-v18.0',
+	'jsonstor-oracle-v18': 'jsonstor-oracle-v18.0',
+	'jsonstor-oracle-v21': 'jsonstor-oracle-v18.0',
+	'jsonstor-oracle-v21.3': 'jsonstor-oracle-v18.0',
+	'jsonstor-oracle-v23': 'jsonstor-oracle-v23.26',
 };

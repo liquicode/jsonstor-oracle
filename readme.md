@@ -51,6 +51,29 @@ let storage = jsonstor.GetStorage( 'jsonstor-oracle', {
 } );
 ```
 
+Versions
+---------------------------------------------------------------------
+
+This package answers to more than one name. Pass any of these to `GetStorage()`;
+  a name which is not listed is refused.
+
+| Name | Dialect it uses | Measured against |
+|------|-----------------|------------------|
+| `jsonstor-oracle-v18.0` | its own | 18.0 |
+| `jsonstor-oracle-v23.26` | its own | 23.26 |
+| `jsonstor-oracle` | `jsonstor-oracle-v18.0` | - |
+| `jsonstor-oracle-v18` | `jsonstor-oracle-v18.0` | - |
+| `jsonstor-oracle-v21` | `jsonstor-oracle-v18.0` | - |
+| `jsonstor-oracle-v21.3` | `jsonstor-oracle-v18.0` | 21.3 |
+| `jsonstor-oracle-v23` | `jsonstor-oracle-v23.26` | - |
+
+A name with its own dialect was measured against that server version and covers every
+  later one up to the next such name. The rest resolve to one of those. The bare name
+  follows the newest dialect this package carries, which is what most callers want.
+
+A name whose dialect your server cannot serve is refused on the first operation, naming
+  the version you asked for and the one the server needs.
+
 Settings
 ---------------------------------------------------------------------
 
