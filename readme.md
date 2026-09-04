@@ -41,7 +41,8 @@ let storage = jsonstor.GetStorage( 'jsonstor-oracle', {
 	Database: '...',
 	Schema: '...',
 	Table: '...',
-	IdField: "",
+	PrimaryKey: "",
+	PrimaryKeyMutable: false,
 	UserName: '...',
 	Password: '...',
 	ModifySchema: false,
@@ -84,7 +85,8 @@ Settings
 | `Database` | ***Yes*** | - | The service name to connect to, which is the last part of the `host:port/service` connect string. It must already exist; this adapter never creates one. |
 | `Schema` | No | `the `UserName`, upper cased` | The schema holding the table. A schema is a user in Oracle, so this is an account name and it must already exist. |
 | `Table` | ***Yes*** | - | The name of the table to use. |
-| `IdField` | No | `""` | The column to treat as the document identifier. Empty means none. |
+| `PrimaryKey` | No | `""` | The column to treat as the document identifier. Empty discovers it from the table: a column named `_id`, then an auto-increment key. `IdField` is the former spelling and still works. |
+| `PrimaryKeyMutable` | No | `false` | Allow an update or a replacement to change the identifier. Off by default, so an operation which would move it is refused by name rather than silently discarded. |
 | `UserName` | ***Yes*** | - | The user to connect as. |
 | `Password` | ***Yes*** | - | That user's password. Pass an empty string for none - the setting itself is required. |
 | `ModifySchema` | No | `false` | Allow the adapter to create the table and the columns it is told to create. It never creates a schema, and never adds a column because a document had a field. |
